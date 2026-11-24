@@ -5,3 +5,7 @@ streamlit>=1.37
 soundfile>=0.12
 scipy>=1.10
 pytest>=8
+
+# Compact CPU detector (downloaded on first use; not stored in GitHub)
+onnxruntime>=1.18,<2
+huggingface-hub>=0.26,<2
