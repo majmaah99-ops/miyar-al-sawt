@@ -11,7 +11,13 @@ import pandas as pd
 import streamlit as st
 
 from audit import POLICIES, read_scores, run_audit, stats, thresholds
-from infer_audio import run as infer_real_audio, read_mono, aggregation_key
+from infer_audio import run as infer_real_audio
+from light_detector import load_session as load_light_session, evaluate as evaluate_light_audio, with_decision as light_decision
+
+@st.cache_resource(show_spinner=False)
+def cached_light_model():
+    return load_light_session()
+
 
 st.set_page_config(page_title="مِعيار الصوت", page_icon="🎙️", layout="wide")
 st.markdown('''<style>
@@ -76,43 +82,73 @@ with one:
         st.caption('لبدء التجربة: استخدم ملف examples/DEMO_SYNTHETIC_scores.csv أو ملف درجات فعلي. الملف التوضيحي ليس بيانات نموذج حقيقي.')
 
 with two:
-    st.subheader('فحص تسجيل عربي بنموذج DeepFense الرسمي')
-    st.caption('هذه الصفحة لا تعرض نتائج مصطنعة. يتطلب الاستدلال الحقيقي تنزيل أوزان النموذج وتهيئة DeepFense على الجهاز الذي يستضيف التطبيق.')
-    default_dir=os.getenv('MIYAR_MODEL_DIR','models/ArA-DF-Baseline')
-    model_dir=st.text_input('مجلد النموذج على الخادم',value=default_dir)
-    upload=st.file_uploader('اختر WAV أو FLAC (حد 120 ثانية في هذه النسخة)',type=['wav','flac'],key='audio')
-    report_upload=st.file_uploader('اختياري: تقرير عتبة من تدقيق سابق (JSON)',type=['json'],key='threshold_report')
-    required=[Path(model_dir)/name for name in ('best_model.pth','xlsr2_300m.pt','config.yaml','run_inference.py')]
-    available=all(path.is_file() for path in required)
-    if available:
-        st.success('ملفات النموذج الأساسية موجودة. يحتاج التشغيل أيضًا إلى DeepFense واعتمادياته.')
-    else:
-        st.warning('أوزان النموذج أو ملف الاستدلال غير متاحة في المجلد المحدد. يمكن رفع ملف للاستماع، لكن لن يظهر حكم دون تشغيل النموذج.')
-    if upload:
-        data=upload.getvalue()
-        if len(data)>25*1024*1024:
-            st.error('الملف يتجاوز الحد التجريبي 25MB')
+    st.subheader('فحص تسجيل صوتي بنموذج ذكاء اصطناعي حقيقي')
+    st.info('أصبح الفحص المبدئي متاحًا عبر نموذج ONNX مضغوط يعمل على CPU. يتم تنزيل النموذج مرة واحدة عند أول تحليل؛ ولا يتطلب ملف JSON.')
+    st.caption('النموذج GPTTrace WavLM (122MB، CC BY-SA 4.0) مدرّب على بيانات يغلب عليها الإنجليزية؛ نتائجه على العربية غير مثبتة بعد. لا تُستخدم النتائج لإثبات صحة التسجيل أو اتهام شخص.')
+    backend = st.radio('طريقة التحليل', ['نموذج سحابي خفيف — تجربة فورية', 'النموذج العربي الكبير — يتطلب إعداد خادم'], horizontal=False)
+    upload = st.file_uploader('ارفع تسجيل WAV أو FLAC (أقل من 25 ميجابايت و120 ثانية)', type=['wav', 'flac'], key='audio')
+    report_upload = st.file_uploader('اختياري: تقرير معايرة عتبة مناسب لهذا النموذج (JSON)؛ اتركه فارغًا للتجربة الأولى', type=['json'], key='threshold_report')
+    if backend.startswith('نموذج سحابي'):
+        st.caption('تُستخدم عتبة صفر غير معايرة عند عدم تقديم تقرير متوافق. درجة النموذج خام وليست احتمالًا مئويًا.')
+        if upload:
+            audio_bytes = upload.getvalue()
+            if len(audio_bytes) > 25 * 1024 * 1024:
+                st.error('حجم الملف أكبر من 25 ميجابايت')
+            else:
+                st.audio(audio_bytes, format='audio/wav' if upload.name.lower().endswith('.wav') else 'audio/flac')
+                if st.button('تحليل الصوت فعليًا', type='primary', key='run_real_light'):
+                    with tempfile.TemporaryDirectory() as td:
+                        suffix = '.flac' if upload.name.lower().endswith('.flac') else '.wav'
+                        audio_path = Path(td) / ('uploaded' + suffix)
+                        audio_path.write_bytes(audio_bytes)
+                        try:
+                            with st.spinner('تحميل نموذج الكشف عند الحاجة وتحليل الصوت على CPU...'):
+                                session = cached_light_model()
+                                result = evaluate_light_audio(audio_path, session)
+                                calibrated_report = json.loads(report_upload.getvalue().decode('utf-8')) if report_upload else None
+                                result = light_decision(result, calibrated_report)
+                            st.success('تم تشغيل نموذج كشف حقيقي وإنتاج درجات استدلال')
+                            st.markdown('### نتيجة الفحص الأولية')
+                            st.write('**القرار:**', result['decision'])
+                            st.metric('درجة الاشتباه الخام', f"{result['spoof_score']:.4f}")
+                            st.caption(f"العتبة: {result['threshold']:.4f} | نوع القرار: {result['decision_type']}")
+                            st.warning(result['warning'])
+                            st.markdown('#### النوافذ الصوتية التي استخدمها النموذج')
+                            st.dataframe(pd.DataFrame(result['windows']), use_container_width=True, hide_index=True)
+                            st.caption('قيم النوافذ لا تعني تحديد كلمات مزيفة أو لحظة تركيب الصوت بدقة.')
+                            st.download_button('تنزيل تقرير الفحص JSON', data=json.dumps(result, ensure_ascii=False, indent=2),
+                                               file_name='miyar_audio_detection.json', mime='application/json')
+                        except Exception as exc:
+                            st.error(f'تعذر التحليل الحقيقي: {exc}')
+                            st.info('إذا ظهر خطأ تنزيل الأوزان أو نفاد الذاكرة، تحقق من موارد Streamlit والسجل في Manage app. يمكنك تشغيل النموذج على خادم أقوى عند الحاجة.')
         else:
-            st.audio(data,format='audio/wav' if upload.name.lower().endswith('.wav') else 'audio/flac')
-            if st.button('تحليل الصوت فعليًا',type='primary',disabled=not available):
+            st.caption('ارفع تسجيلًا لتفعيل زر التحليل.')
+    else:
+        st.caption('هذا الخيار يستخدم النموذج العربي الرسمي ArA-DF-Baseline ويحتاج ملفات كبيرة وبيئة DeepFense.')
+        model_dir = st.text_input('مجلد النموذج على الخادم', value=os.getenv('MIYAR_MODEL_DIR', 'models/ArA-DF-Baseline'))
+        required = [Path(model_dir) / name for name in ('best_model.pth', 'xlsr2_300m.pt', 'config.yaml', 'run_inference.py')]
+        available = all(path.is_file() for path in required)
+        if not available:
+            st.warning('لم تثبت أوزان النموذج العربي الكبير. اختر النموذج السحابي الخفيف بالأعلى للتجربة.')
+        if upload and st.button('تحليل بالنموذج العربي الكبير', disabled=not available):
+            data = upload.getvalue()
+            if len(data) > 25 * 1024 * 1024:
+                st.error('الملف يتجاوز 25 ميجابايت')
+            else:
                 with tempfile.TemporaryDirectory() as td:
-                    path=Path(td)/('incoming.wav' if upload.name.lower().endswith('.wav') else 'incoming.flac')
+                    ext = '.wav' if upload.name.lower().endswith('.wav') else '.flac'
+                    path = Path(td) / ('uploaded' + ext)
                     path.write_bytes(data)
                     try:
-                        with st.spinner('تشغيل نموذج الكشف على الجهاز المضيف...'):
-                            reportpath=None
-                            if report_upload:
-                                reportpath=Path(td)/'threshold.json'
-                                reportpath.write_bytes(report_upload.getvalue())
-                            result=infer_real_audio(path,model_dir,decision_report=reportpath)
-                        st.success('تمت معالجة الصوت بالنموذج')
-                        st.write('**درجة الاشتباه الخام:**',f"{result['spoof_score']:.5f}")
-                        st.write('**القرار:**',result['decision'])
-                        st.caption('الدرجة ليست احتمال تزييف. النوافذ المشتبه بها إشارات استكشافية وليست دليلًا على حدود تغيير كلمة.')
-                        st.dataframe(pd.DataFrame(result['segments']),use_container_width=True)
-                        st.download_button('حفظ نتيجة الفحص JSON',json.dumps(result,ensure_ascii=False,indent=2),file_name='audio_result.json',mime='application/json')
+                        rp = None
+                        if report_upload:
+                            rp = Path(td) / 'threshold.json'
+                            rp.write_bytes(report_upload.getvalue())
+                        with st.spinner('تشغيل النموذج العربي...'):
+                            result = infer_real_audio(path, model_dir, decision_report=rp)
+                        st.json(result)
                     except Exception as exc:
-                        st.error(f'لم ينجح الاستدلال الحقيقي: {exc}')
+                        st.error(f'تعذر تشغيل النموذج العربي: {exc}')
 
 with three:
     st.subheader('ماذا أُنجز، وما الذي لم يُثبت بعد؟')
