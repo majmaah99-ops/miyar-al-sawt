@@ -71,3 +71,21 @@ def test_speech_with_silent_pauses_is_finite(tmp_path):
     result = compare_to_reference(p, p)
     assert np.isfinite([item["difference_index"] for item in result["timeline"]]).all()
     assert result["regions"] == []
+
+
+def test_synthetic_edit_at_end_is_located(tmp_path):
+    """A signal-processing regression, NOT voice cloning detection validation."""
+    duration = 6
+    t = np.arange(duration * SAMPLE_RATE) / SAMPLE_RATE
+    original = (0.1 * np.sin(2 * np.pi * 210 * t)
+                + 0.07 * np.sin(2 * np.pi * 470 * t)).astype("float32")
+    modified = original.copy()
+    start = int(5.1 * SAMPLE_RATE)
+    modified[start:] = (0.12 * np.sin(2 * np.pi * 1200 * t[start:])
+                        + 0.05 * np.sin(2 * np.pi * 1900 * t[start:])).astype("float32")
+    a, b = tmp_path / "original.wav", tmp_path / "edited.wav"
+    sf.write(a, original, SAMPLE_RATE)
+    sf.write(b, modified, SAMPLE_RATE)
+    result = compare_to_reference(a, b)
+    assert any(r["start_seconds"] <= 5.2 <= r["end_seconds"]
+               for r in result["regions"]), result["regions"]
