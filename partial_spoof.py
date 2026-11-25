@@ -82,7 +82,13 @@ def _fingerprints(audio):
         features.append(np.log1p(np.mean(spectrum[:, mask], axis=1)))
     f = np.column_stack(features).astype("float32")
     f -= f.mean(axis=1, keepdims=True)
-    return f / np.maximum(np.linalg.norm(f, axis=1, keepdims=True), 1e-6)
+    norm = np.linalg.norm(f, axis=1, keepdims=True)
+    # Silent frames have a zero feature vector; cosine distance is NaN there.
+    # Use a fixed unit reference to keep alignment finite, without claiming
+    # that silence is evidence of AI editing.
+    f[norm[:, 0] < 1e-6, 0] = 1.0
+    norm = np.linalg.norm(f, axis=1, keepdims=True)
+    return f / np.maximum(norm, 1e-6)
 
 
 def _dtw_match(a, b):
