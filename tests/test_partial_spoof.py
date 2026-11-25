@@ -60,3 +60,14 @@ def test_reference_max_duration(tmp_path):
     sf.write(p, tone(46), SAMPLE_RATE)
     with pytest.raises(ValueError, match="45"):
         compare_to_reference(p, p)
+
+
+def test_speech_with_silent_pauses_is_finite(tmp_path):
+    x = tone(5)
+    x[:int(.5 * SAMPLE_RATE)] = 0
+    x[-int(.5 * SAMPLE_RATE):] = 0
+    p = tmp_path / "with_pauses.wav"
+    sf.write(p, x, SAMPLE_RATE)
+    result = compare_to_reference(p, p)
+    assert np.isfinite([item["difference_index"] for item in result["timeline"]]).all()
+    assert result["regions"] == []
